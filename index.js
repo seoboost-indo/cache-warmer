@@ -17,7 +17,7 @@ const DOMAINS_MAP = {
 
 const PROXIES = {
   // contoh: http://user:pass@zproxy.lum-superproxy.io:22225
-  id: process.env.BRD_PROXY_AU,
+  id: process.env.BRD_PROXY_ID,
 };
 
 const USER_AGENTS = {
