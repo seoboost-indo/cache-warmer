@@ -1,9 +1,15 @@
-name: Run Cache Warmer Every Days 2 Times
+name: Run Cache Warmer (2x consecutive, 12h wait, 2x consecutive)
 
 on:
   schedule:
-    - cron: "0 0 * * *"  
-    - cron: "0 12 * * *"   
+    # Batch 1 (morning)
+    - cron: "0 0 * * *"     # 08:00 WITA – crawl #1
+    - cron: "20 0 * * *"     # 08:05 WITA – crawl #2
+
+    # Batch 2 (night)
+    - cron: "0 12 * * *"    # 20:00 WITA – crawl #3
+    - cron: "20 12 * * *"    # 20:05 WITA – crawl #4
+
   workflow_dispatch:
 
 jobs:
@@ -26,6 +32,11 @@ jobs:
         run: npm run start
         env:
           BRD_PROXY_ID: ${{ secrets.BRD_PROXY_ID }}
+          BRD_PROXY_US: ${{ secrets.BRD_PROXY_US }}
+          BRD_PROXY_AE: ${{ secrets.BRD_PROXY_AE }}
+          BRD_PROXY_UK: ${{ secrets.BRD_PROXY_UK }}
+          BRD_PROXY_HK: ${{ secrets.BRD_PROXY_HK }}
+          BRD_PROXY_BR: ${{ secrets.BRD_PROXY_BR }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
           APPS_SCRIPT_URL: ${{ secrets.APPS_SCRIPT_URL }}
