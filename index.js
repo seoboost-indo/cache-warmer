@@ -9,19 +9,47 @@ dotenv.config();
 /* ====== ENV WAJIB ====== */
 const APPS_SCRIPT_URL = process.env.APPS_SCRIPT_URL;
 
-/* ====== KONFIG DOMAIN/PROXY/UA ====== */
+/* ====== KONFIG DOMAIN/PROXY/UA ======
+   Sesuaikan DOMAINS_MAP dengan label internal yang kamu mau.
+   Contoh di bawah menunjukkan banyak proxy label — ganti/menghapus sesuai kebutuhan.
+*/
 const DOMAINS_MAP = {
-  // ganti key "id" sesuai grouping kamu (hanya label internal)
   id: "https://seoboost.id",
+  us: "https://seoboost.id", // akses pake proxy US
+  ae: "https://seoboost.ae",
+  uk: "https://seoboost.london",
+  hk: "https://seoboost.id", // contoh
+  br: "https://seoboost.id",
+  sa: "https://seoboost.ae", // contoh pakai domain yang sama tapi lewat proxy Saudi
+  au: "https://seoboost.au",
+  de: "https://seoboost.berlin",
+  nu: "https://seoboost.nu",
 };
 
 const PROXIES = {
-  // contoh: http://user:pass@zproxy.lum-superproxy.io:22225
   id: process.env.BRD_PROXY_ID,
+  us: process.env.BRD_PROXY_US,
+  ae: process.env.BRD_PROXY_AE,
+  uk: process.env.BRD_PROXY_UK,
+  hk: process.env.BRD_PROXY_HK,
+  br: process.env.BRD_PROXY_BR,
+  sa: process.env.BRD_PROXY_SA,
+  au: process.env.BRD_PROXY_AU,
+  de: process.env.BRD_PROXY_DE,
+  nu: process.env.BRD_PROXY_NU,
 };
 
 const USER_AGENTS = {
   id: "Seoboost-CacheWarmer-ID/1.0",
+  us: "Seoboost-CacheWarmer-US/1.0",
+  ae: "Seoboost-CacheWarmer-AE/1.0",
+  uk: "Seoboost-CacheWarmer-UK/1.0",
+  hk: "Seoboost-CacheWarmer-HK/1.0",
+  br: "Seoboost-CacheWarmer-BR/1.0",
+  sa: "Seoboost-CacheWarmer-SA/1.0",
+  au: "Seoboost-CacheWarmer-AU/1.0",
+  de: "Seoboost-CacheWarmer-DE/1.0",
+  nu: "Seoboost-CacheWarmer-NU/1.0",
 };
 
 /* ====== CLOUDFLARE (opsional) ====== */
@@ -29,7 +57,7 @@ const CLOUDFLARE_ZONE_ID = process.env.CLOUDFLARE_ZONE_ID;
 const CLOUDFLARE_API_TOKEN = process.env.CLOUDFLARE_API_TOKEN;
 
 /* ====== APPS SHEET HEADERS (synchronize with Apps Script) ======
-   NOTE: no vercel_id column — we removed vercelId from logs.
+   Tambahkan vercel_edge agar kolom tidak bergeser.
 */
 const APPS_SHEET_HEADERS = [
   "run_id",
@@ -41,6 +69,7 @@ const APPS_SHEET_HEADERS = [
   "cf_cache",
   "vercel_cache",
   "cf_ray",
+  "vercel_edge", // <-- new
   "response_ms",
   "error",
   "message",
@@ -78,6 +107,7 @@ class AppsScriptLogger {
     cfCache = "",
     vcCache = "",
     cfRay = "",
+    vercelEdge = "",
     responseMs = "",
     error = 0,
     message = "",
@@ -92,6 +122,7 @@ class AppsScriptLogger {
       cfCache, // cf_cache (Cloudflare)
       vcCache, // vercel_cache (x-vercel-cache)
       cfRay, // cf_ray
+      vercelEdge, // vercel_edge (parsed from x-vercel-id)
       typeof responseMs === "number" ? responseMs : "", // response_ms
       error ? 1 : 0, // error (0/1)
       message, // message
@@ -137,7 +168,7 @@ class AppsScriptLogger {
 /* ====== HTTP helper (proxy) ====== */
 function buildAxiosCfg(country, extra = {}) {
   const proxy = PROXIES[country];
-  const headers = { "User-Agent": USER_AGENTS[country] };
+  const headers = { "User-Agent": USER_AGENTS[country] || "CacheWarmer/1.0" };
 
   // siapkan agent + paksa Proxy-Authorization kalau ada user:pass
   let httpAgent, httpsAgent;
@@ -216,7 +247,14 @@ async function fetchUrlsFromSingleSitemap(domain, country) {
   }
 }
 
-/* ====== WARMING (use cf-ray for edge/country) ====== */
+/* ====== Helpers untuk parse Vercel edge pop ====== */
+function getVercelEdgePop(vercelIdHeader) {
+  if (typeof vercelIdHeader !== "string") return "N/A";
+  const parts = vercelIdHeader.split("::").filter(Boolean);
+  return parts[0] || "N/A"; // contoh: "syd1", "iad1"
+}
+
+/* ====== WARMING ====== */
 async function retryableGet(url, cfg, retries = 3) {
   let lastError = null;
   for (let i = 0; i < retries; i++) {
@@ -279,6 +317,7 @@ async function warmUrls(urls, country, logger, batchSize = 1, delay = 2000) {
           const cfCache = res.headers["cf-cache-status"] || "N/A";
           const vcCache = res.headers["x-vercel-cache"] || "N/A";
           const cfRay = res.headers["cf-ray"] || "N/A";
+          const vercelId = res.headers["x-vercel-id"] || "N/A";
 
           // Extract CF edge PoP code (last segment after dash in cf-ray, e.g. "...-LHR")
           let cfEdge = "N/A";
@@ -287,14 +326,16 @@ async function warmUrls(urls, country, logger, batchSize = 1, delay = 2000) {
             cfEdge = parts[parts.length - 1] || "N/A";
           }
 
+          const vercelEdge = getVercelEdgePop(vercelId);
+
           // Prefer Cloudflare edge as 'country' tag; fallback to original label
           const countryTag = cfEdge && cfEdge !== "N/A" ? cfEdge : country;
 
           console.log(
-            `[${countryTag}] ${res.status} cf=${cfCache} vercel=${vcCache} cf_edge=${cfEdge} - ${url}`
+            `[${countryTag}] ${res.status} cf=${cfCache} vercel=${vcCache} cf_edge=${cfEdge} vercel_edge=${vercelEdge} - ${url}`
           );
 
-          // log WITHOUT vercelId column
+          // log WITH vercel_edge column
           logger.log({
             country: countryTag,
             url,
@@ -302,6 +343,7 @@ async function warmUrls(urls, country, logger, batchSize = 1, delay = 2000) {
             cfCache,
             vcCache,
             cfRay,
+            vercelEdge,
             responseMs: dt,
             error: 0,
             message: "",
@@ -332,7 +374,7 @@ async function warmUrls(urls, country, logger, batchSize = 1, delay = 2000) {
   }
 }
 
-/* ====== MAIN ====== */
+/* ====== MAIN (batch per-run, satu tab) ====== */
 (async () => {
   console.log(`[CacheWarmer] Started: ${new Date().toISOString()}`);
   const logger = new AppsScriptLogger();
@@ -352,6 +394,7 @@ async function warmUrls(urls, country, logger, batchSize = 1, delay = 2000) {
       })
     );
   } finally {
+    // Kirim SEKALI di akhir → semua baris tersimpan dalam SATU tab (sheetName per-run)
     logger.setFinished();
     await logger.flush();
   }
