@@ -5,142 +5,242 @@ import * as dotenv from "dotenv";
 
 dotenv.config();
 
-/* ============================================================
-   ENV
-============================================================ */
+/* ====== ENV WAJIB ====== */
 const APPS_SCRIPT_URL = process.env.APPS_SCRIPT_URL;
 
+/* ====== KONFIG DOMAIN/PROXY/UA ====== */
+const DOMAINS_MAP = {
+  id: "https://seoboost.id",
+};
+
+const PROXIES = {
+  id: process.env.BRD_PROXY_ID,
+};
+
+const USER_AGENTS = {
+  id: "Seoboost-CacheWarmer-ID/1.0",
+};
+
+/* ====== CLOUDFLARE (opsional) ====== */
 const CLOUDFLARE_ZONE_ID = process.env.CLOUDFLARE_ZONE_ID;
 const CLOUDFLARE_API_TOKEN = process.env.CLOUDFLARE_API_TOKEN;
 
-/* ============================================================
-   SINGLE CONFIG (ID ONLY)
-============================================================ */
-const DOMAIN = "https://seoboost.id";
-const PROXY = process.env.BRD_PROXY_ID;
-const USER_AGENT = "Seoboost-CacheWarmer-ID/1.0";
+/* ====== APPS SHEET HEADERS (tambah vercel_edge) ====== */
+const APPS_SHEET_HEADERS = [
+  "run_id",
+  "started_at",
+  "finished_at",
+  "country",
+  "url",
+  "status",
+  "cf_cache",
+  "vercel_cache",
+  "cf_ray",
+  "vercel_edge",
+  "response_ms",
+  "error",
+  "message",
+];
 
-/* ============================================================
-   UTIL
-============================================================ */
+/* ====== UTIL ====== */
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const runId = Math.random().toString(36).slice(2) + Date.now().toString(36);
+const cryptoRandomId = () =>
+  Math.random().toString(36).slice(2) + Date.now().toString(36);
 
-function makeSheetName() {
-  const d = new Date(Date.now() + 8 * 3600 * 1000); // WITA
-  const p = (n) => String(n).padStart(2, "0");
-  return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(
-    d.getUTCDate()
-  )}_${p(d.getUTCHours())}-${p(d.getUTCMinutes())}-${p(
-    d.getUTCSeconds()
+function makeSheetNameForRun(date = new Date()) {
+  const pad = (n) => String(n).padStart(2, "0");
+  const local = new Date(date.getTime() + 8 * 3600 * 1000); // WITA +08
+  return `${local.getUTCFullYear()}-${pad(local.getUTCMonth() + 1)}-${pad(
+    local.getUTCDate()
+  )}_${pad(local.getUTCHours())}-${pad(local.getUTCMinutes())}-${pad(
+    local.getUTCSeconds()
   )}_WITA`;
 }
 
-function extractCfEdge(cfRay) {
-  if (!cfRay || typeof cfRay !== "string") return "UNKNOWN";
-  const parts = cfRay.split("-");
-  return parts[parts.length - 1] || "UNKNOWN";
-}
-
-function extractVercelEdge(xvid) {
-  if (!xvid || typeof xvid !== "string") return "N/A";
-  return xvid.split("::")[0] || "N/A";
-}
-
-/* ============================================================
-   LOGGER → GOOGLE SHEETS
-============================================================ */
+/* ====== LOGGER → APPS SCRIPT (BATCH PER-RUN) ====== */
 class AppsScriptLogger {
   constructor() {
     this.rows = [];
-    this.sheetName = makeSheetName();
+    this.runId = cryptoRandomId();
     this.startedAt = new Date().toISOString();
     this.finishedAt = null;
+    this.sheetName = makeSheetNameForRun();
   }
 
-  log(row) {
+  log({
+    country = "",
+    url = "",
+    status = "",
+    cfCache = "",
+    vcCache = "",
+    cfRay = "",
+    vercelEdge = "",
+    responseMs = "",
+    error = 0,
+    message = "",
+  }) {
     this.rows.push([
-      runId,
+      this.runId,
       this.startedAt,
       this.finishedAt,
-      row.edge,
-      row.url,
-      row.status || "",
-      row.cfCache || "",
-      row.vercelCache || "",
-      row.cfRay || "",
-      row.vercelEdge || "",
-      row.responseMs || "",
-      row.error ? 1 : 0,
-      row.message || "",
+      country,
+      url,
+      status,
+      cfCache,
+      vcCache,
+      cfRay,
+      vercelEdge,
+      typeof responseMs === "number" ? responseMs : "",
+      error ? 1 : 0,
+      message,
     ]);
   }
 
-  finalize() {
+  setFinished() {
     this.finishedAt = new Date().toISOString();
     this.rows = this.rows.map((r) => ((r[2] = this.finishedAt), r));
   }
 
   async flush() {
-    if (!APPS_SCRIPT_URL || this.rows.length === 0) return;
+    if (!APPS_SCRIPT_URL) {
+      console.warn("Apps Script logging disabled (missing APPS_SCRIPT_URL).");
+      return;
+    }
+    if (this.rows.length === 0) return;
 
-    await axios.post(
-      APPS_SCRIPT_URL,
-      { sheetName: this.sheetName, rows: this.rows },
-      { timeout: 20000, headers: { "Content-Type": "application/json" } }
-    );
+    try {
+      const payload = {
+        sheetName: this.sheetName,
+        headers: APPS_SHEET_HEADERS,
+        rows: this.rows,
+      };
 
-    console.log(`📝 Logged ${this.rows.length} rows → ${this.sheetName}`);
-    this.rows = [];
+      const res = await axios.post(APPS_SCRIPT_URL, payload, {
+        timeout: 60000,
+        headers: { "Content-Type": "application/json" },
+      });
+      console.log("Apps Script response:", res.status, res.data);
+      if (!res.data?.ok) console.warn("Apps Script replied error:", res.data);
+      this.rows = [];
+    } catch (e) {
+      console.warn(
+        "Apps Script logging error:",
+        e?.response?.status,
+        e?.response?.data || e?.message || e
+      );
+    }
   }
 }
 
-/* ============================================================
-   AXIOS CONFIG
-============================================================ */
-function axiosCfg() {
-  const agent = PROXY ? new HttpsProxyAgent(PROXY) : undefined;
+/* ====== HTTP helper (proxy) ====== */
+function buildAxiosCfg(country, extra = {}) {
+  const proxy = PROXIES[country];
+  const headers = { "User-Agent": USER_AGENTS[country] || "CacheWarmer/1.0" };
+
+  let httpAgent, httpsAgent;
+  if (proxy) {
+    try {
+      const u = new URL(proxy);
+      if (u.username && u.password) {
+        const basic = Buffer.from(
+          `${decodeURIComponent(u.username)}:${decodeURIComponent(u.password)}`
+        ).toString("base64");
+        headers["Proxy-Authorization"] = `Basic ${basic}`;
+      }
+      const agent = new HttpsProxyAgent(proxy, { keepAlive: true });
+      httpAgent = agent;
+      httpsAgent = agent;
+    } catch (e) {
+      console.warn(
+        `[${country}] Invalid proxy URL: ${proxy} (${e?.message || e})`
+      );
+    }
+  }
+
   return {
-    httpsAgent: agent,
-    headers: { "User-Agent": USER_AGENT },
+    headers,
     timeout: 30000,
+    httpAgent,
+    httpsAgent,
+    ...extra,
   };
 }
 
-/* ============================================================
-   SITEMAP
-============================================================ */
-async function fetchUrls() {
-  try {
-    const xml = await axios
-      .get(`${DOMAIN}/sitemap.xml`, axiosCfg())
-      .then((r) => r.data);
+/* ====== SITEMAP (single /sitemap.xml) ====== */
+async function fetchWithProxy(url, country, timeout = 15000) {
+  const cfg = buildAxiosCfg(country, { timeout });
+  const res = await axios.get(url, cfg);
+  return res.data;
+}
 
-    const parsed = await parseStringPromise(xml, {
+async function fetchUrlsFromSingleSitemap(domain, country) {
+  try {
+    const xml = await fetchWithProxy(`${domain}/sitemap.xml`, country, 20000);
+    const result = await parseStringPromise(xml, {
       explicitArray: false,
       ignoreAttrs: true,
     });
 
-    const urls = parsed?.urlset?.url;
-    if (!urls) return [];
+    const urlList = result?.urlset?.url;
+    if (!urlList) return [];
 
-    return (Array.isArray(urls) ? urls : [urls])
-      .map((u) => u.loc)
-      .filter(Boolean);
-  } catch (e) {
-    console.warn("❌ Failed to fetch sitemap:", e?.message || e);
+    const urls = Array.isArray(urlList) ? urlList : [urlList];
+    const locs = urls.map((entry) => entry.loc).filter(Boolean);
+
+    const sameHost = new URL(domain).host.replace(/^www\./i, "");
+    const unique = Array.from(
+      new Set(
+        locs.filter((u) => {
+          try {
+            const h = new URL(u).host.replace(/^www\./i, "");
+            return h === sameHost;
+          } catch {
+            return false;
+          }
+        })
+      )
+    );
+
+    return unique;
+  } catch (err) {
+    console.warn(
+      `[${country}] ❌ Failed to fetch URLs from ${domain}/sitemap.xml: ${err?.message || err
+      }`
+    );
     return [];
   }
 }
 
-/* ============================================================
-   CLOUDFLARE PURGE
-============================================================ */
-async function purgeCloudflare(url) {
-  if (!CLOUDFLARE_ZONE_ID || !CLOUDFLARE_API_TOKEN) return;
+/* === helper: ambil POP vercel dari x-vercel-id === */
+function getVercelEdgePop(vercelIdHeader) {
+  if (typeof vercelIdHeader !== "string") return "N/A";
+  const parts = vercelIdHeader.split("::").filter(Boolean);
+  return parts[0] || "N/A";
+}
 
+/* ====== WARMING ====== */
+async function retryableGet(url, cfg, retries = 3) {
+  let lastError = null;
+  for (let i = 0; i < retries; i++) {
+    try {
+      return await axios.get(url, cfg);
+    } catch (err) {
+      lastError = err;
+      const code = err?.code || "";
+      const retryable =
+        axios.isAxiosError(err) &&
+        ["ECONNABORTED", "ECONNRESET", "ETIMEDOUT"].includes(code);
+      if (!retryable) break;
+      await sleep(2000);
+    }
+  }
+  throw lastError;
+}
+
+async function purgeCloudflareCache(url) {
+  if (!CLOUDFLARE_ZONE_ID || !CLOUDFLARE_API_TOKEN) return;
   try {
-    await axios.post(
+    const purgeRes = await axios.post(
       `https://api.cloudflare.com/client/v4/zones/${CLOUDFLARE_ZONE_ID}/purge_cache`,
       { files: [url] },
       {
@@ -150,71 +250,112 @@ async function purgeCloudflare(url) {
         },
       }
     );
-  } catch {}
-}
-
-/* ============================================================
-   WARMER (EDGE = CF EDGE REAL)
-============================================================ */
-async function warm(urls, logger) {
-  for (const url of urls) {
-    const t0 = Date.now();
-    try {
-      const res = await axios.get(url, axiosCfg());
-      const dt = Date.now() - t0;
-
-      const cfRay = res.headers["cf-ray"] || "";
-      const edge = extractCfEdge(cfRay);
-
-      const cfCache = res.headers["cf-cache-status"] || "N/A";
-      const vercelCache = res.headers["x-vercel-cache"] || "N/A";
-
-      console.log(
-        `[${edge}] ${res.status} cf=${cfCache} vercel=${vercelCache} - ${url}`
-      );
-
-      logger.log({
-        edge,
-        url,
-        status: res.status,
-        cfCache,
-        vercelCache,
-        cfRay,
-        vercelEdge: extractVercelEdge(res.headers["x-vercel-id"]),
-        responseMs: dt,
-      });
-
-      if (vercelCache !== "HIT") {
-        await purgeCloudflare(url);
-      }
-    } catch (e) {
-      logger.log({
-        edge: "ERROR",
-        url,
-        error: 1,
-        message: e?.message || "request failed",
-      });
+    if (purgeRes.data?.success) {
+      console.log(`✅ Cloudflare cache purged: ${url}`);
+    } else {
+      console.warn(`⚠️ Failed to purge Cloudflare: ${url}`);
     }
-
-    await sleep(1500);
+  } catch {
+    console.warn(`❌ Error purging Cloudflare: ${url}`);
   }
 }
 
-/* ============================================================
-   MAIN
-============================================================ */
+async function warmUrls(urls, country, logger, batchSize = 1, delay = 2000) {
+  const batches = Array.from(
+    { length: Math.ceil(urls.length / batchSize) },
+    (_, i) => urls.slice(i * batchSize, i * batchSize + batchSize)
+  );
+
+  for (const batch of batches) {
+    await Promise.all(
+      batch.map(async (url) => {
+        const t0 = Date.now();
+        try {
+          const res = await retryableGet(
+            url,
+            buildAxiosCfg(country, { timeout: 15000 }),
+            3
+          );
+          const dt = Date.now() - t0;
+
+          const cfCache = res.headers["cf-cache-status"] || "N/A";
+          const vcCache = res.headers["x-vercel-cache"] || "N/A";
+          const cfRay = res.headers["cf-ray"] || "N/A";
+          const vercelId = res.headers["x-vercel-id"] || "N/A";
+          const vercelEdge = getVercelEdgePop(vercelId);
+
+          let cfEdge = "N/A";
+          if (typeof cfRay === "string" && cfRay.includes("-")) {
+            const parts = cfRay.split("-");
+            cfEdge = parts[parts.length - 1] || "N/A";
+          }
+
+          const countryTag = cfEdge && cfEdge !== "N/A" ? cfEdge : country;
+
+          console.log(
+            `[${countryTag}] ${res.status} cf=${cfCache} vercel=${vcCache} cf_edge=${cfEdge} vercel_edge=${vercelEdge} - ${url}`
+          );
+
+          logger.log({
+            country: countryTag,
+            url,
+            status: res.status,
+            cfCache,
+            vcCache,
+            cfRay,
+            vercelEdge,
+            responseMs: dt,
+            error: 0,
+            message: "",
+          });
+
+          if (String(vcCache).toUpperCase() !== "HIT") {
+            await purgeCloudflareCache(url);
+          }
+        } catch (err) {
+          const dt = Date.now() - t0;
+          console.warn(
+            `[${country}] ❌ Failed to warm ${url}: ${err?.message || err}`
+          );
+
+          logger.log({
+            country,
+            url,
+            responseMs: dt,
+            error: 1,
+            message: err?.message || "request failed",
+          });
+        }
+      })
+    );
+
+    await sleep(delay);
+  }
+}
+
+/* ====== MAIN ====== */
 (async () => {
-  console.log(`[CacheWarmer] Started ${new Date().toISOString()}`);
+  console.log(`[CacheWarmer] Started: ${new Date().toISOString()}`);
   const logger = new AppsScriptLogger();
 
   try {
-    const urls = await fetchUrls();
-    console.log(`[ID] Found ${urls.length} URLs`);
-    await warm(urls, logger);
+    await Promise.all(
+      Object.entries(DOMAINS_MAP).map(async ([country, domain]) => {
+        const urls = await fetchUrlsFromSingleSitemap(domain, country);
+
+        console.log(`[${country}] Found ${urls.length} URLs`);
+        logger.log({
+          country,
+          message: `Found ${urls.length} URLs for ${country}`,
+        });
+
+        await warmUrls(urls, country, logger);
+      })
+    );
   } finally {
-    logger.finalize();
+    logger.setFinished();
     await logger.flush();
   }
 
-  console.log(`[CacheWarmer] Finished ${new Date().toISOString()}`);
+  console.log(`[CacheWarmer] Finished: ${new Date().toISOString()}`);
 })();
